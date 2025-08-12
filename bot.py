@@ -1,45 +1,101 @@
 import os
-import telegram
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
+from PIL import Image, ImageDraw, ImageFont
 
-# --- Configuration (Yeh Render.com se values lega) ---
-# Is code ko bilkul aise hi rehne dein. Token yahan nahi likhna hai.
+# Enable logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Get environment variables from Render.com
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
-# --- End of Configuration ---
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+WATERMARK_TEXT = os.environ.get("WATERMARK_TEXT")
 
+# Define the professional caption
+POST_CAPTION = "hack kharidne ke liye contact @TPKINGOWNER"
 
-# --- Functions ---
-async def start(update, context):
-    """/start command ke liye. User ko welcome message bhejta hai."""
-    await update.message.reply_text("Namaste! Feedback ya koi post share karne ke liye, mujhe koi photo bhejein.")
-
-async def forward_photo_to_channel(update, context):
-    """User se photo receive karke channel par bhejta hai."""
+def add_watermark(photo_path):
     try:
-        photo_id = update.message.photo[-1].file_id
-        caption = update.message.caption
-        
-        await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo_id, caption=caption)
-        
-        await update.message.reply_text("Shukriya! Aapka photo channel par post kar diya gaya hai.")
-        print("Feedback photo successfully forwarded.")
-        
+        image = Image.open(photo_path).convert("RGBA")
+        txt = Image.new("RGBA", image.size, (255, 255, 255, 0))
+        try:
+            font = ImageFont.truetype("arial.ttf", size=max(15, int(image.height / 30)))
+        except IOError:
+            font = ImageFont.load_default()
+        d = ImageDraw.Draw(txt)
+        text_width, text_height = d.textsize(WATERMARK_TEXT, font=font)
+        x = (image.width - text_width) / 2
+        y = image.height - text_height - (image.height * 0.05)
+        d.rectangle([x-5, y-5, x + text_width + 5, y + text_height + 5], fill=(0, 0, 0, 128))
+        d.text((x, y), WATERMARK_TEXT, font=font, fill=(255, 255, 255, 220))
+        watermarked = Image.alpha_composite(image, txt).convert("RGB")
+        watermarked_path = "watermarked.jpg"
+        watermarked.save(watermarked_path)
+        return watermarked_path
     except Exception as e:
-        print(f"Failed to forward photo: {e}")
-        await update.message.reply_text("Maaf kijiye, photo bhejte waqt koi problem aa gayi.")
+        logger.error(f"Error adding watermark: {e}")
+        return None
 
-def main():
-    """Bot ko run karne ke liye main function."""
-    application = Application.builder().token(BOT_TOKEN).build()
+def start(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text('Hello! Please send me a photo to submit for review.')
 
-    # Handlers add karein
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.PHOTO, forward_photo_to_channel))
+def handle_photo(update: Update, context: CallbackContext) -> None:
+    user_id = update.message.from_user.id
+    photo_file = update.message.photo[-1].get_file()
+    context.bot_data[photo_file.file_id] = {'user_id': user_id}
+    keyboard = [[
+        InlineKeyboardButton("✅ Approve", callback_data=f'approve_{photo_file.file_id}'),
+        InlineKeyboardButton("❌ Reject", callback_data=f'reject_{photo_file.file_id}'),
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    context.bot.send_photo(
+        chat_id=ADMIN_ID, 
+        photo=photo_file.file_id, 
+        caption=f"New photo from user {user_id}. Approve to post in channel.",
+        reply_markup=reply_markup
+    )
+    update.message.reply_text("Thanks! Your photo has been submitted for admin approval.")
 
-    # Bot ko run karein
-    print("Bot is running and listening for photos...")
-    application.run_polling()
+def button_callback(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    query.answer()
+    action, file_id = query.data.split('_', 1)
+    if action == "approve":
+        query.edit_message_caption(caption="✅ Approved. Posting to channel...")
+        photo = context.bot.get_file(file_id)
+        photo.download('temp_photo.jpg')
+        watermarked_photo_path = add_watermark('temp_photo.jpg')
+        if watermarked_photo_path:
+            with open(watermarked_photo_path, 'rb') as photo_to_send:
+                context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo_to_send, caption=POST_CAPTION)
+            query.edit_message_caption(caption="✅ Photo posted successfully with watermark!")
+            os.remove(watermarked_photo_path)
+        else:
+             query.edit_message_caption(caption="⚠️ Error: Could not apply watermark. Posting original.")
+             context.bot.send_photo(chat_id=CHANNEL_ID, photo=file_id, caption=POST_CAPTION)
+        os.remove('temp_photo.jpg')
+    elif action == "reject":
+        query.edit_message_caption(caption="❌ Rejected. The photo will not be posted.")
+    if file_id in context.bot_data:
+        del context.bot_data[file_id]
+
+def main() -> None:
+    if not all([BOT_TOKEN, CHANNEL_ID, ADMIN_ID, WATERMARK_TEXT]):
+        logger.error("Missing one or more critical environment variables on Render.com!")
+        return
+    updater = Updater(BOT_TOKEN)
+    dispatcher = updater.dispatcher
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(MessageHandler(Filters.photo & ~Filters.command, handle_photo))
+    dispatcher.add_handler(CallbackQueryHandler(button_callback))
+    updater.start_polling()
+    logger.info("Bot is running and listening...")
+    updater.idle()
 
 if __name__ == '__main__':
     main()
