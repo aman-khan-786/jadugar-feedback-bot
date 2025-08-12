@@ -1,5 +1,6 @@
 import os
 import logging
+import uuid
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
 from PIL import Image, ImageDraw, ImageFont
@@ -47,12 +48,25 @@ def start(update: Update, context: CallbackContext) -> None:
 def handle_photo(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
     photo_file = update.message.photo[-1].get_file()
-    context.bot_data[photo_file.file_id] = {'user_id': user_id}
-    keyboard = [[
-        InlineKeyboardButton("✅ Approve", callback_data=f'approve_{photo_file.file_id}'),
-        InlineKeyboardButton("❌ Reject", callback_data=f'reject_{photo_file.file_id}'),
-    ]]
+    
+    # Create a short ID because file_id is too long for buttons
+    short_id = uuid.uuid4().hex[:16]
+    
+    # Store the original file_id using the short_id as the key
+    context.bot_data[short_id] = {
+        'file_id': photo_file.file_id,
+        'user_id': user_id
+    }
+
+    keyboard = [
+        [
+            # Use the short_id in the callback data
+            InlineKeyboardButton("✅ Approve", callback_data=f'approve_{short_id}'),
+            InlineKeyboardButton("❌ Reject", callback_data=f'reject_{short_id}'),
+        ]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
     context.bot.send_photo(
         chat_id=ADMIN_ID, 
         photo=photo_file.file_id, 
@@ -64,12 +78,26 @@ def handle_photo(update: Update, context: CallbackContext) -> None:
 def button_callback(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     query.answer()
-    action, file_id = query.data.split('_', 1)
+    
+    # The second part is now the short_id
+    action, short_id = query.data.split('_', 1)
+
+    # Check if we have data for this short_id
+    if short_id not in context.bot_data:
+        query.edit_message_caption(caption="⚠️ Error: This approval request has expired or is invalid.")
+        return
+
+    # Retrieve the original file_id from bot_data
+    file_id = context.bot_data[short_id]['file_id']
+
     if action == "approve":
         query.edit_message_caption(caption="✅ Approved. Posting to channel...")
+        
         photo = context.bot.get_file(file_id)
         photo.download('temp_photo.jpg')
+
         watermarked_photo_path = add_watermark('temp_photo.jpg')
+
         if watermarked_photo_path:
             with open(watermarked_photo_path, 'rb') as photo_to_send:
                 context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo_to_send, caption=POST_CAPTION)
@@ -78,11 +106,14 @@ def button_callback(update: Update, context: CallbackContext) -> None:
         else:
              query.edit_message_caption(caption="⚠️ Error: Could not apply watermark. Posting original.")
              context.bot.send_photo(chat_id=CHANNEL_ID, photo=file_id, caption=POST_CAPTION)
+
         os.remove('temp_photo.jpg')
+
     elif action == "reject":
         query.edit_message_caption(caption="❌ Rejected. The photo will not be posted.")
-    if file_id in context.bot_data:
-        del context.bot_data[file_id]
+        
+    # Clean up bot_data using the short_id
+    del context.bot_data[short_id]
 
 def main() -> None:
     if not all([BOT_TOKEN, CHANNEL_ID, ADMIN_ID, WATERMARK_TEXT]):
