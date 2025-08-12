@@ -24,17 +24,32 @@ def add_watermark(photo_path):
     try:
         image = Image.open(photo_path).convert("RGBA")
         txt = Image.new("RGBA", image.size, (255, 255, 255, 0))
+
+        # Choose a font. First try the uploaded font, then fall back.
+        font_size = max(15, int(image.height / 30))
         try:
-            font = ImageFont.truetype("arial.ttf", size=max(15, int(image.height / 30)))
+            # Try to use the uploaded font first
+            font = ImageFont.truetype("Roboto-Regular.ttf", size=font_size)
         except IOError:
+            logger.warning("Roboto-Regular.ttf not found. Falling back to default font.")
             font = ImageFont.load_default()
+
         d = ImageDraw.Draw(txt)
+
+        # Position for the watermark (bottom center)
         text_width, text_height = d.textsize(WATERMARK_TEXT, font=font)
         x = (image.width - text_width) / 2
-        y = image.height - text_height - (image.height * 0.05)
+        y = image.height - text_height - (image.height * 0.05) # 5% from bottom
+
+        # Add a semi-transparent background to the text
         d.rectangle([x-5, y-5, x + text_width + 5, y + text_height + 5], fill=(0, 0, 0, 128))
+        
+        # Draw the text
         d.text((x, y), WATERMARK_TEXT, font=font, fill=(255, 255, 255, 220))
-        watermarked = Image.alpha_composite(image, txt).convert("RGB")
+
+        watermarked = Image.alpha_composite(image, txt)
+        watermarked = watermarked.convert("RGB") # Convert back to RGB to save as JPEG
+        
         watermarked_path = "watermarked.jpg"
         watermarked.save(watermarked_path)
         return watermarked_path
@@ -49,10 +64,8 @@ def handle_photo(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
     photo_file = update.message.photo[-1].get_file()
     
-    # Create a short ID because file_id is too long for buttons
     short_id = uuid.uuid4().hex[:16]
     
-    # Store the original file_id using the short_id as the key
     context.bot_data[short_id] = {
         'file_id': photo_file.file_id,
         'user_id': user_id
@@ -60,7 +73,6 @@ def handle_photo(update: Update, context: CallbackContext) -> None:
 
     keyboard = [
         [
-            # Use the short_id in the callback data
             InlineKeyboardButton("✅ Approve", callback_data=f'approve_{short_id}'),
             InlineKeyboardButton("❌ Reject", callback_data=f'reject_{short_id}'),
         ]
@@ -79,15 +91,12 @@ def button_callback(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     query.answer()
     
-    # The second part is now the short_id
     action, short_id = query.data.split('_', 1)
 
-    # Check if we have data for this short_id
     if short_id not in context.bot_data:
         query.edit_message_caption(caption="⚠️ Error: This approval request has expired or is invalid.")
         return
 
-    # Retrieve the original file_id from bot_data
     file_id = context.bot_data[short_id]['file_id']
 
     if action == "approve":
@@ -112,7 +121,6 @@ def button_callback(update: Update, context: CallbackContext) -> None:
     elif action == "reject":
         query.edit_message_caption(caption="❌ Rejected. The photo will not be posted.")
         
-    # Clean up bot_data using the short_id
     del context.bot_data[short_id]
 
 def main() -> None:
